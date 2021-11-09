@@ -1,8 +1,8 @@
 import cv2
 
 
-def get_camera(width, height):
-    cap = cv2.VideoCapture(0)
+def get_camera(width, height, num=0):
+    cap = cv2.VideoCapture(num)
     if not cap.isOpened():
         raise IOError("Cannot open webcam")
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
