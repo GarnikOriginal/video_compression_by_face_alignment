@@ -1,7 +1,7 @@
 import cv2
 
 
-def get_camera(width, height, num=0):
+def get_camera(height, width, num=0):
     cap = cv2.VideoCapture(num)
     if not cap.isOpened():
         raise IOError("Cannot open webcam")

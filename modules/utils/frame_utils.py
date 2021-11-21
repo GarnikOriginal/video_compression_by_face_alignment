@@ -1,4 +1,6 @@
 import cv2
+import numpy as np
+import os.path as osp
 from modules._3DDFA_V2.utils.render import render
 from modules._3DDFA_V2.utils.functions import cv_draw_landmark
 
@@ -16,3 +18,4 @@ def draw_mask(frame, vert, tddfa=None, flag="2d_sparse"):
         return render(frame, [vert], tddfa.tri, alpha=0.7)
     else:
         raise NotImplementedError(f"Flag {flag} is not implemented")
+
