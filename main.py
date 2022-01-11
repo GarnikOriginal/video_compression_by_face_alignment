@@ -1,77 +1,80 @@
-import os
-from time import sleep
-
 import cv2
-import ffmpeg
 import yaml
 import torch
-from datetime import datetime
 import numpy as np
-from subprocess import Popen, PIPE, DEVNULL
 from os.path import join
-from modules._3DDFA_V2.utils.io import _load
+from subprocess import Popen, PIPE
 from modules._3DDFA_V2.utils.tddfa_util import _to_ctype
-from modules._3DDFA_V2.utils.uv import process_uv, load_uv_coords, bilinear_interpolate
+from modules._3DDFA_V2.utils.uv import bilinear_interpolate
 from modules._3DDFA_V2.Sim3DR import rasterize
+from modules._3DDFA_V2.FaceBoxes import FaceBoxes
+from modules._3DDFA_V2.TDDFA import TDDFA
 
 
-from modules.utils.model import load_model
-from modules.utils.camera import get_camera
-from modules.utils.fps_counter import FPSCounter
-from modules.utils.frame_utils import add_fps
+# 38367 = 3 * 3 * 3 * 7 * 7 * 29
+w, h = 1280, 720
+scale = 2
+fps = 25
+source = join("samples", "original", "misha_light.mp4")
+out_file = join("samples", "results", "misha_light", "misha_light")
 
-
-h, w = 480, 640             # h, w = 1080, 1920
-z_h, z_w = 48 * 2, 64 * 2   # z_h, z_w = 108, 192
-yuv_height = int(h + h // 2)
-
-ONNX_MODE = False
-# TDDFA_CONFIG_PATH = "configs/tddfa_onnx_config.yml"
+z_h, z_w = int(h / scale), int(w / scale)
+ONNX_MODE = True
 TDDFA_CONFIG_PATH = "configs/mb05_120x120.yml"
 
 
-if __name__ == '__main__':
-    tddfa, faceboxes = load_model(TDDFA_CONFIG_PATH, ONNX_MODE)
-    cv2.namedWindow('Reconstruction')
-    fps_counter = FPSCounter(30)
+def process_video(file, out, zipper='libx264'):
+    cfg = yaml.load(open(TDDFA_CONFIG_PATH), Loader=yaml.SafeLoader)
+    tddfa = TDDFA(gpu_mode=False, **cfg)
+    faceboxes = FaceBoxes()
+    ffmpeg_output = ['ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo', '-s', f'{w}x{h}', '-pix_fmt', 'rgb24',
+                     '-r', f'{fps}', '-i', '-', '-an', '-vcodec', zipper, '-pix_fmt', 'yuv420p', f'{out}.mp4']
+    ffmpeg_zip_background = ['ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo', '-s', f'{z_w}x{z_h}',
+                             '-pix_fmt', 'rgb24', '-r', f'{fps}', '-i', '-', '-an', '-vcodec', zipper, '-pix_fmt', 'yuv420p', f'{out}_bg.mp4']
+    ffmpeg_zip_colors = ['ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo', '-s', f'147x261',
+                         '-pix_fmt', 'rgb24', '-r', f'{fps}', '-i', '-', '-an', '-vcodec', "libvpx", f'{out}_cs.webm']
 
-    
-    """
-    stream_url = f'ffmpeg -f v4l2 -s {w}x{h} -i /dev/video0 ' \
-                 f'-f rawvideo -pix_fmt yuv420p -y pipe:'.split(' ')
+    cap = cv2.VideoCapture(file)
+    if not cap.isOpened():
+        raise IOError("Cannot open video source")
+
     with torch.no_grad():
-        with Popen(stream_url, stdout=PIPE) as p:
-            fps_counter.run()
-            while p.stdout.readable():
-                raw_frame = p.stdout.read(yuv_height * w)
-                if len(raw_frame) == yuv_height * w:
-                    frame = np.frombuffer(raw_frame, np.uint8).reshape((yuv_height, w))
-                    frame = cv2.cvtColor(frame, cv2.COLOR_YUV420P2RGB)
-                    boxes = faceboxes(frame)
-                    background = cv2.resize(frame, (z_w, z_h), interpolation=cv2.INTER_AREA)
-                    if boxes:
-                        param_lst, roi_box_lst = tddfa(frame, [boxes[0]], crop_policy="box")
-                        ver = tddfa.recon_vers(param_lst, roi_box_lst, DENSE_FLAG=True)[0]
-                        ver = _to_ctype(ver.T)
-                        colors = bilinear_interpolate(frame, ver[:, 0], ver[:, 1]) / 255.
+        out = Popen(ffmpeg_output, stdin=PIPE, stderr=PIPE)
+        bg_out = Popen(ffmpeg_zip_background, stdin=PIPE, stderr=PIPE)
+        cl_out = Popen(ffmpeg_zip_colors, stdin=PIPE, stderr=PIPE)
+        while True:
+            ret, frame = cap.read()
+            if frame is None:
+                break
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            boxes = faceboxes(frame)
+            background_zipped = cv2.resize(frame.copy(), (z_w, z_h), interpolation=cv2.INTER_AREA)
+            background = cv2.resize(background_zipped, (w, h), interpolation=cv2.INTER_LINEAR)
+            if len(boxes) != 0:
+                param_lst, roi_box_lst = tddfa(frame, boxes, crop_policy="box")
+                ver = tddfa.recon_vers(param_lst, roi_box_lst, DENSE_FLAG=True)
 
-                        frame = cv2.resize(background, (w, h), interpolation=cv2.INTER_AREA)
-                        frame = cv2.blur(frame, (7, 7))
-                        frame = rasterize(ver, tddfa.tri, colors, bg=frame, height=h, width=w, channel=3)
-                    else:
-                        frame = cv2.resize(background, (w, h), interpolation=cv2.INTER_AREA)
-                        frame = cv2.blur(frame, (7, 7))
+                colors = []
+                for v in ver:
+                    v = _to_ctype(v.T)
+                    colors.append(bilinear_interpolate(frame, v[:, 0], v[:, 1]) / 255)
 
-                    fps = fps_counter.get_fps()
-                    fps_counter.step()
-                    add_fps(frame, fps)
-                    cv2.imshow("Reconstruction", frame)
-                    c = cv2.waitKey(1)
-                    if c == 27:
-                        break
-                else:
-                    print("Read broken frame", f"Len - {len(raw_frame)}")
-                    break
+                for i, v in enumerate(ver):
+                    background = rasterize(_to_ctype(v.T), tddfa.tri, colors[i],
+                                           bg=background, height=h, width=w, channel=3)
 
-            cv2.destroyAllWindows()
-    """
+                c = np.pad(colors[0], ((0, 2), (0, 0)), mode='constant', constant_values=0).reshape((147, 261, 3))
+                c = (c * 255).astype(np.uint8)
+                cl_out.stdin.write(c.tobytes())
+
+            out.stdin.write(background.tobytes())
+            bg_out.stdin.write(background_zipped.tobytes())
+
+        out.terminate()
+        bg_out.terminate()
+        cl_out.terminate()
+
+
+if __name__ == '__main__':
+    process_video(source, out_file, zipper="libx264")
+
